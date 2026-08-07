@@ -80,26 +80,44 @@ home screen.
 
 ## Architecture
 
-One APK, package `dev.erinlkolp.glassspotify`. **Zero third-party dependencies.**
+One APK, package `dev.erinlkolp.glassspotify`. **No third-party code in the APK.**
 
 The no-dependency rule is deliberate. Gotcha #5 records d8 8.2.2-dev NPE-ing on enums
-compiled by JDK 21, and gotcha #4 records the `options.release` trap. Every added jar is
+compiled by JDK 21 javac, and JDK 21 is what is installed here. Every added jar is
 another artifact through that dex path. `HttpsURLConnection` and `org.json` are both in
 the platform. OkHttp is additionally unattractive because 3.12.x is the last line
 supporting API 21 and is long unmaintained.
 
+### Module layout
+
+Two Gradle modules, mirroring the launcher's proven `gesture-core` + `app` split. This
+is what makes the JVM testing story real rather than aspirational: everything worth
+testing lives in a plain `java-library` that never sees an emulator.
+
+| Module | Type | Contains |
+|---|---|---|
+| `spotify-core` | `java-library` | `SpotifyClient`, `TokenStore`, `PlaybackState`, error mapping. Pure Java SE — `HttpsURLConnection` and `SSLContext` are both JDK classes. |
+| `app` | `com.android.application` | `ControllerActivity`, `NowPlayingView`, gesture translation, manifest, PEM resources |
+
+`spotify-core` takes `org.json` as `compileOnly` plus `testImplementation`. Android
+provides `org.json` at runtime, so nothing third-party is packaged into the APK while
+tests still get a real implementation. `TlsFactory` lives in `app` (it reads
+`res/raw`) and hands `spotify-core` an already-built `SSLSocketFactory`, so the core
+module stays Android-free.
+
 ```
-ControllerActivity        UI, gesture handling, immersive mode
+app ─────────────────────────────────────────┐
+  ControllerActivity   UI, gestures, immersive mode
         │
-        ├── PlayerController      orchestration, optimistic state, polling lifecycle
-        │        │
-        │        ├── SpotifyClient        the only class that touches the network
-        │        │        ├── TokenStore      refresh-token persistence + rotation
-        │        │        └── TlsFactory      bundled trust anchors (conditional, see below)
-        │        │
-        │        └── PlaybackState      immutable snapshot
+        ├── NowPlayingView      rendering only
+        └── TlsFactory          bundled trust anchors (conditional, see below)
+                                        │
+spotify-core ───────────────────────────┼─────┐
+  PlayerController   orchestration, optimistic state, polling lifecycle
         │
-        └── NowPlayingView        rendering only
+        ├── SpotifyClient       the only class that touches the network
+        │        └── TokenStore     refresh-token persistence + rotation
+        └── PlaybackState       immutable snapshot
 ```
 
 ### Component responsibilities
@@ -186,10 +204,13 @@ must be repeated.
 
 Therefore `TokenStore`:
 
-- Writes rotated tokens atomically (temp file plus rename, or `commit()` before the
-  refreshed token is used for anything).
+- Persists the rotated token by **write-temp-then-`rename`** on the same filesystem.
+  `rename` is atomic, and this keeps `TokenStore` in `spotify-core` as plain Java SE
+  with no `SharedPreferences` dependency. A partially written file can never be
+  observed.
+- Persists the new refresh token *before* the access token that arrived with it is used
+  for any request.
 - Treats a persist failure as **fatal and surfaced**, never swallowed.
-- Persists the new token *before* the access token it arrived with is used.
 
 Access tokens live 3600s. On `401`, refresh once and retry the original request exactly
 once.
@@ -252,12 +273,17 @@ Status messages replace the state line when something needs saying.
 Ordinary `View.onTouchEvent(MotionEvent)`. All single-finger, which avoids gotcha #1
 entirely — the framework's multitouch collapse only affects two-finger gestures.
 
-| Gesture | Action |
-|---|---|
-| Tap | Play / pause |
-| Swipe forward | Next track |
-| Swipe back | Previous track |
-| Swipe down | Exit |
+| Gesture | Physical direction | Action |
+|---|---|---|
+| Tap | — | Play / pause |
+| Swipe forward | Toward the front of the head, i.e. increasing X | Next track |
+| Swipe back | Toward the ear, i.e. decreasing X | Previous track |
+| Swipe down | Toward the ground, i.e. increasing Y | Exit |
+
+Directions are stated physically because the touchpad's native surface is 1366x187
+rescaled onto 640x360, so "left" and "right" are ambiguous between the pad and the
+display. The launcher's `GestureOrientation.DEFAULT` already encodes this mapping and
+is the reference if there is ever doubt.
 
 ### Immersive mode is load-bearing
 
@@ -329,16 +355,49 @@ mask a bad build (gotcha #6).
 
 ## Build setup
 
-From the recorded gotchas:
+Mirror the launcher, which is a known-good configuration on this toolchain:
+AGP 8.7.0, `compileSdk = 34`, `minSdk = 22`, `targetSdk = 22`, Java 8 compatibility,
+`android.useAndroidX=false`, JUnit 4.13.2. Kotlin DSL build scripts.
 
-- Install `openjdk-N-jdk-headless`. Ubuntu's JRE package has `jdk.compiler` but no
-  `lib/ct.sym`, so `options.release = 8` fails with a misleading error (gotcha #4).
-- Use `sourceCompatibility`/`targetCompatibility`, not `options.release`.
-- Avoid enums in shipped code where practical, to dodge the d8 `MethodParameters` NPE
-  rather than needing the jar-stripping workaround (gotcha #5).
+Toolchain notes, from the recorded gotchas and verified 2026-08-07:
+
+- Host JDK is **OpenJDK 21.0.11**, and it is a full JDK with `lib/ct.sym`. Gotcha #4
+  was about Ubuntu's *JRE* package lacking `ct.sym`; that does not apply here.
+- Consequently `options.release.set(8)` **does** work for the `java-library` module, and
+  the launcher already relies on it in `gesture-core/build.gradle.kts`. The Android
+  module uses `compileOptions { sourceCompatibility / targetCompatibility }` instead,
+  because AGP emits `-source`/`-target` rather than `--release`. Follow that split.
+- JDK 21 javac is exactly the trigger for gotcha #5, where d8 8.2.2-dev NPEs on any
+  enum because javac records a nameless `MethodParameters` entry for implicit
+  enum-constructor params. **Avoid enums in shipped code**; use `static final int`
+  constants. This dodges the jar-stripping workaround entirely.
 - Use the system Android SDK, as the launcher moved to in commit `3d01d3c`.
 - Device shell lacks `head`, `which`, `pidof`, `sed`. Pipe to the host instead
   (gotcha #8).
+
+### Devices
+
+Both attached over adb as of 2026-08-07:
+
+| Role | Serial | Product |
+|---|---|---|
+| Glass | `0123456789ABCDEF` | `aosp_glass_1` |
+| Phone | `VS9967edd915b` | LG V30, `joan_vzw` |
+
+## Phone independence
+
+A replacement Android phone is on order, expected around late August 2026.
+
+**This design requires no work when it arrives.** Because control is mediated by the
+Spotify cloud rather than a direct Glass-to-phone link, the phone is interchangeable:
+install Spotify, log into the same account, and the new handset becomes the active
+Connect device. There is no pairing to redo, no companion APK to reinstall, and no
+device-specific code anywhere in this project.
+
+This is a meaningful contrast with the Notifications project, which uses classic
+Bluetooth RFCOMM plus an Android companion app and *will* need bring-up work on the new
+phone. Worth keeping in mind when sequencing the two projects, but it is not a
+dependency in either direction.
 
 ## Open questions
 
