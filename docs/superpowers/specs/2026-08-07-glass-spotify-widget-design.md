@@ -315,11 +315,24 @@ is useless on a see-through display read while walking.
 
 ## Known limitation: WiFi coverage
 
-This is the direct cost of dropping the companion app, and it is accepted knowingly.
+This is the direct cost of dropping the companion app. **Raised and explicitly accepted
+by Erin on 2026-08-07.**
 
-The app works only when Glass has internet. At home or the office, fine. Out walking,
-Glass must be on the phone's hotspot, which costs battery on both devices. The
-Bluetooth route would need no network but would need the companion app.
+The app works only when Glass has internet. At home or the office, that is the normal
+WiFi network. Away from known networks, Glass joins the phone's hotspot, which Erin is
+happy to enable when out. The Bluetooth route would need no network but would need the
+companion app, which is the thing being avoided.
+
+Design consequences:
+
+- Glass must have the home network **and** the phone's hotspot saved, so it roams
+  between them without intervention.
+- Hotspot costs battery on both devices. Glass's battery is the smaller constraint, and
+  the 3s poll runs only while the controller is actually on screen, which keeps this to
+  the duration of active use rather than all day.
+- `UnknownHostException` handling matters more than it would on a permanently connected
+  device: `No network` is an expected state here, not an exceptional one, and must not
+  look like a crash.
 
 ## Testing
 
