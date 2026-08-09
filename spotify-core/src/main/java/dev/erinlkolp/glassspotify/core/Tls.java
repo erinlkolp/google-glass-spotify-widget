@@ -23,11 +23,30 @@ public final class Tls {
 
     private static final String[] PROTOCOLS = { "TLSv1.2" };
 
+    /**
+     * One shared instance, deliberately.
+     *
+     * <p>This must be a singleton or connection pooling silently stops working.
+     * API 22's {@code HttpsURLConnection} is backed by com.android.okhttp, which
+     * includes the {@code SSLSocketFactory} in the {@code Address} it uses as the
+     * connection-pool key, compared by reference since this class defines no
+     * {@code equals}. Returning a fresh factory per request therefore produces a
+     * fresh {@code Address} that matches nothing in the pool, so every request pays a
+     * full TLS 1.2 handshake — meaningful on a 3-second poll loop against this
+     * device's battery. Returning the same instance lets the pool do its job.
+     *
+     * <p>Safe to share: the factory is stateless, and {@link SSLSocketFactory}
+     * implementations are required to be thread-safe.
+     */
+    private static final SSLSocketFactory INSTANCE =
+            new Tls12SocketFactory((SSLSocketFactory) SSLSocketFactory.getDefault());
+
     private Tls() {
     }
 
+    /** @return the shared TLS 1.2 factory. Never construct a second one — see {@link #INSTANCE}. */
     public static SSLSocketFactory socketFactory() {
-        return new Tls12SocketFactory((SSLSocketFactory) SSLSocketFactory.getDefault());
+        return INSTANCE;
     }
 
     private static final class Tls12SocketFactory extends SSLSocketFactory {
