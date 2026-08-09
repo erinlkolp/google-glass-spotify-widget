@@ -177,7 +177,18 @@ roughly 200-500ms, which is why the optimistic flip matters.
 
 If Spotify on the phone has been force-killed, `GET /v1/me/player` returns
 `204 No Content` and there is no device to command. The Web API cannot wake a dead
-app. Backgrounded is fine; killed is not. This surfaces as `No active device`.
+app. Backgrounded is fine; killed is not.
+
+**Correction, 2026-08-09.** An earlier draft of this section said the dead-app case
+surfaces as `No active device`, which contradicted the error table below where `204`
+maps to `Nothing playing`. The table is right and the implementation follows it.
+Spotify returns a bare `204` both when nothing is playing and when no device is
+active, and the two are indistinguishable without an extra `GET /v1/me/player/devices`
+call. Rather than add a second request to every poll, `204` shows `Nothing playing`,
+and `No active device` is reserved for the `404 NO_ACTIVE_DEVICE` that a *command*
+returns. So a force-killed phone app reads as `Nothing playing` until you try to
+control it, at which point it says `No active device`. That is a deliberate trade,
+not an oversight.
 
 ## Authentication
 

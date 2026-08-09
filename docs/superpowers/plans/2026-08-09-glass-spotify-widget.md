@@ -1411,12 +1411,16 @@ public final class SpotifyClient {
             return PlaybackState.of(e.status);
         }
 
-        if (response.code == 204 || response.body.length() == 0) {
-            return PlaybackState.of(Status.NOTHING_PLAYING);
-        }
+        // Failure codes must be mapped BEFORE the empty-body check. A 429 arrives with
+        // an empty body, so checking emptiness first would report rate limiting as
+        // "Nothing playing". mapFailure returns null only for 2xx, so this ordering
+        // leaves every success path untouched.
         Status failure = mapFailure(response.code);
         if (failure != null) {
             return PlaybackState.of(failure);
+        }
+        if (response.code == 204 || response.body.length() == 0) {
+            return PlaybackState.of(Status.NOTHING_PLAYING);
         }
 
         try {
@@ -1992,10 +1996,13 @@ SCOPES = "user-read-playback-state user-modify-playback-state"
 OUTPUT = "tools/refresh_token.txt"
 
 _received = {}
+_expected_state = None
 
 
 class CallbackHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        global _expected_state
+
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path != "/callback":
             self.send_response(404)
@@ -2003,8 +2010,22 @@ class CallbackHandler(http.server.BaseHTTPRequestHandler):
             return
 
         params = urllib.parse.parse_qs(parsed.query)
+        returned_state = params.get("state", [None])[0]
         _received["code"] = params.get("code", [None])[0]
         _received["error"] = params.get("error", [None])[0]
+
+        # The state parameter is worthless unless it is actually compared. A
+        # mismatch (or an absent value, since _expected_state is always set)
+        # discards the code so the exchange below cannot run.
+        if returned_state != _expected_state:
+            _received["code"] = None
+            _received["state_mismatch"] = True
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            body = "<h1>Failed.</h1><p>State mismatch: CSRF check failed.</p>"
+            self.wfile.write(body.encode("utf-8"))
+            return
 
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -2032,8 +2053,11 @@ def main():
         return 1
     client_id = sys.argv[1]
 
+    global _expected_state
+
     verifier, challenge = make_verifier()
     state = secrets.token_urlsafe(16)
+    _expected_state = state
 
     authorize_url = "https://accounts.spotify.com/authorize?" + urllib.parse.urlencode({
         "client_id": client_id,
@@ -2053,6 +2077,10 @@ def main():
     webbrowser.open(authorize_url)
     thread.join(timeout=300)
     server.server_close()
+
+    if _received.get("state_mismatch"):
+        print("State mismatch: CSRF check failed. Authorization aborted.")
+        return 1
 
     if not _received.get("code"):
         print("No authorization code received: %s" % _received.get("error"))
@@ -2076,7 +2104,10 @@ def main():
 
     refresh_token = token.get("refresh_token")
     if not refresh_token:
-        print("No refresh_token in response: %s" % token)
+        # Print only the error fields. The raw dict can carry an access_token,
+        # and this script must never emit a credential to stdout.
+        error_msg = token.get("error") or token.get("error_description") or "unknown error"
+        print("No refresh_token in response: %s" % error_msg)
         return 1
 
     with open(OUTPUT, "w", encoding="utf-8") as handle:
@@ -2453,6 +2484,30 @@ git commit -m "feat(app): NowPlayingView rendering white on black"
 - Produces: the finished app.
 
 **Replace `CLIENT_ID` with the real Client ID from Task 8 before building.**
+
+> **Two defects in the reference code below were found in review and fixed during
+> implementation. The committed source is authoritative; this listing is not.**
+>
+> 1. **`importBootstrapTokenIfPresent` was not idempotent, and could cause a permanent
+>    Spotify lockout.** It re-imported on every launch for as long as the pushed file
+>    existed, and its javadoc wrongly claimed `pushed.delete()` prevented that.
+>    `/data/local/tmp` carries the sticky bit, so the app's uid cannot reliably delete a
+>    shell-pushed file — an avc denial for exactly this was observed on the device. Once
+>    the delete fails, the next launch overwrites whatever `TokenStore` has rotated to,
+>    and Spotify has already invalidated that original token. Fixed by fingerprinting the
+>    pushed file's contents (SHA-256) into a `bootstrap_fingerprint` marker in
+>    `getFilesDir()`, written with the same write-temp-then-rename discipline as
+>    `TokenStore`, and skipping the import when the fingerprint matches. A genuinely new
+>    pushed token still imports; an undeletable leftover never overwrites.
+> 2. **`publish()` could render into a torn-down Activity.** `shutdownNow()` only
+>    interrupts, and `HttpsURLConnection` blocking I/O ignores interruption, so a command
+>    in flight when the user exits could call `view.render()` up to ~20s later. Fixed by
+>    checking `isFinishing() || isDestroyed()` inside the posted Runnable, on the main
+>    thread.
+>
+> The corrected code is deliberately not re-transcribed here — see
+> `app/src/main/java/dev/erinlkolp/glassspotify/ControllerActivity.java`. Re-transcribing
+> ~80 lines into a document that no longer drives implementation would only invite drift.
 
 - [ ] **Step 1: Write `MotionEventAdapter.java`**
 

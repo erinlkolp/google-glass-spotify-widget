@@ -2,3 +2,8 @@ classes/
 classes.dex
 build/
 .gradle/
+.superpowers/
+tools/refresh_token.txt
+__pycache__/
+data/
+.claude/settings.local.json
