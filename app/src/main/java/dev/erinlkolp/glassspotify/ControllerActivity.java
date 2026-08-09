@@ -279,11 +279,25 @@ public class ControllerActivity extends Activity {
 
     /** Flips the display immediately, then reconciles with the phone on the worker. */
     private void onTap() {
-        view.render(controller.toggleOptimistic());
-        submitCommand(Command.TOGGLE);
+        PlaybackState flipped = controller.toggleOptimistic();
+        view.render(flipped);
+        // Capture the intent here, on the main thread, rather than letting the worker
+        // re-read PlayerController.last(): a poll's queued refresh() can land on the
+        // worker between this flip and the commit and overwrite last with the
+        // server's stale view, which would silently discard this tap.
+        submitToggle(flipped.playing);
     }
 
-    private enum Command { TOGGLE, NEXT, PREVIOUS }
+    private enum Command { NEXT, PREVIOUS }
+
+    private void submitToggle(final boolean wantPlaying) {
+        worker.submit(new Runnable() {
+            @Override
+            public void run() {
+                settleAndPublish(controller.toggleCommit(wantPlaying));
+            }
+        });
+    }
 
     private void submitCommand(final Command command) {
         worker.submit(new Runnable() {
@@ -291,9 +305,6 @@ public class ControllerActivity extends Activity {
             public void run() {
                 PlaybackState state;
                 switch (command) {
-                    case TOGGLE:
-                        state = controller.toggleCommit();
-                        break;
                     case NEXT:
                         state = controller.nextCommit();
                         break;
@@ -301,21 +312,32 @@ public class ControllerActivity extends Activity {
                         state = controller.previousCommit();
                         break;
                 }
-                publish(state);
-
-                // A skip changes the track a moment after the command returns, so take
-                // one more reading rather than showing the outgoing track.
-                if (command != Command.TOGGLE && state.status == Status.OK) {
-                    try {
-                        Thread.sleep(SETTLE_DELAY_MS);
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        return;
-                    }
-                    publish(controller.refresh());
-                }
+                settleAndPublish(state);
             }
         });
+    }
+
+    /**
+     * Publishes the command's immediate result, then — on success — waits out
+     * {@link #SETTLE_DELAY_MS} and takes one more reading before publishing again.
+     *
+     * <p>Applies to every command, not just skips: {@code /v1/me/player} is
+     * eventually consistent for a few hundred milliseconds after any command
+     * (toggle included), so refetching immediately commonly renders
+     * correct → wrong → correct three seconds later at the next poll. Runs on the
+     * worker; must not be called from the main thread.
+     */
+    private void settleAndPublish(PlaybackState state) {
+        publish(state);
+        if (state.status == Status.OK) {
+            try {
+                Thread.sleep(SETTLE_DELAY_MS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            publish(controller.refresh());
+        }
     }
 
     private void submitRefresh() {

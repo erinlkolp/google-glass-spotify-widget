@@ -74,11 +74,11 @@ public class PlayerControllerTest {
     public void commitAfterAnOptimisticPauseSendsPause() {
         http.enqueue(200, PLAYING);
         controller.refresh();
-        controller.toggleOptimistic();
+        PlaybackState flipped = controller.toggleOptimistic();
 
         http.enqueue(204, "");
         http.enqueue(200, PAUSED);
-        controller.toggleCommit();
+        controller.toggleCommit(flipped.playing);
 
         assertEquals("https://api.spotify.com/v1/me/player/pause", http.urls().get(2));
     }
@@ -87,11 +87,11 @@ public class PlayerControllerTest {
     public void commitAfterAnOptimisticResumeSendsPlay() {
         http.enqueue(200, PAUSED);
         controller.refresh();
-        controller.toggleOptimistic();
+        PlaybackState flipped = controller.toggleOptimistic();
 
         http.enqueue(204, "");
         http.enqueue(200, PLAYING);
-        controller.toggleCommit();
+        controller.toggleCommit(flipped.playing);
 
         assertEquals("https://api.spotify.com/v1/me/player/play", http.urls().get(2));
     }
@@ -100,11 +100,11 @@ public class PlayerControllerTest {
     public void commitRefetchesAndReturnsTheAuthoritativeState() {
         http.enqueue(200, PLAYING);
         controller.refresh();
-        controller.toggleOptimistic();
+        PlaybackState flipped = controller.toggleOptimistic();
 
         http.enqueue(204, "");
         http.enqueue(200, PAUSED);
-        PlaybackState state = controller.toggleCommit();
+        PlaybackState state = controller.toggleCommit(flipped.playing);
 
         assertFalse(state.playing);
         assertEquals(Status.OK, state.status);
@@ -115,10 +115,10 @@ public class PlayerControllerTest {
     public void aFailedCommandSurfacesItsStatusAndSkipsTheRefetch() {
         http.enqueue(200, PLAYING);
         controller.refresh();
-        controller.toggleOptimistic();
+        PlaybackState flipped = controller.toggleOptimistic();
 
         http.enqueue(404, "{\"error\":{\"reason\":\"NO_ACTIVE_DEVICE\"}}");
-        PlaybackState state = controller.toggleCommit();
+        PlaybackState state = controller.toggleCommit(flipped.playing);
 
         assertEquals(Status.NO_DEVICE, state.status);
         assertEquals("no refetch after a failed command", 3, http.urls().size());
@@ -129,12 +129,12 @@ public class PlayerControllerTest {
         // The phone rejected the pause and is still playing. The UI must not stay wrong.
         http.enqueue(200, PLAYING);
         controller.refresh();
-        controller.toggleOptimistic();
+        PlaybackState flipped = controller.toggleOptimistic();
         assertFalse(controller.last().playing);
 
         http.enqueue(204, "");
         http.enqueue(200, PLAYING);
-        controller.toggleCommit();
+        controller.toggleCommit(flipped.playing);
 
         assertTrue(controller.last().playing);
     }
@@ -165,13 +165,40 @@ public class PlayerControllerTest {
     }
 
     @Test
+    public void aPollLandingBetweenOptimisticFlipAndCommitDoesNotReverseTheTap() {
+        // Regression for the poll-vs-tap race: pollTick can queue refresh() on the
+        // worker just before a tap's commit runs, and that refresh used to land
+        // between the flip and the commit, overwriting the shared `last` field the
+        // old no-arg toggleCommit() read its intent from. A pause tap would silently
+        // turn into a play call and the prism would flip back a moment later. The
+        // fix is to capture the intent from toggleOptimistic()'s return value at tap
+        // time and pass it into toggleCommit explicitly, never re-reading `last`.
+        http.enqueue(200, PLAYING);
+        controller.refresh();
+
+        PlaybackState flipped = controller.toggleOptimistic(); // tap: pause intent captured
+
+        // The poll's queued refresh() lands before the commit executes.
+        http.enqueue(200, PLAYING);
+        controller.refresh();
+
+        http.enqueue(204, "");
+        http.enqueue(200, PAUSED);
+        controller.toggleCommit(flipped.playing);
+
+        assertEquals(
+                "the interleaved refresh must not flip the user's pause into a play",
+                "https://api.spotify.com/v1/me/player/pause", http.urls().get(3));
+    }
+
+    @Test
     public void togglingWhileNothingIsPlayingSendsPlay() {
         // last() is NOTHING_PLAYING, so playing is false; the flip asks for play.
-        controller.toggleOptimistic();
+        PlaybackState flipped = controller.toggleOptimistic();
 
         http.enqueue(204, "");
         http.enqueue(200, PLAYING);
-        controller.toggleCommit();
+        controller.toggleCommit(flipped.playing);
 
         assertEquals("https://api.spotify.com/v1/me/player/play", http.urls().get(1));
     }

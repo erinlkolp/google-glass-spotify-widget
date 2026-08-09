@@ -14,7 +14,14 @@ public final class PlayerController {
 
     private final SpotifyClient client;
 
-    private PlaybackState last = PlaybackState.of(Status.NOTHING_PLAYING);
+    // volatile for cross-thread visibility only: the worker (refresh/settle) writes
+    // it and the main thread (onResume's last(), and toggleOptimistic()) reads and
+    // writes it, and Executor.submit only establishes happens-before in the
+    // main-to-worker direction. This does not make compound read-modify-write
+    // sequences atomic — the class is still documented as not thread-safe, and
+    // confining it to one worker plus the main-thread optimistic flip remains the
+    // design; volatile just guarantees the main thread never sees a stale value.
+    private volatile PlaybackState last = PlaybackState.of(Status.NOTHING_PLAYING);
 
     public PlayerController(SpotifyClient client) {
         if (client == null) {
@@ -37,17 +44,25 @@ public final class PlayerController {
     /**
      * Flips the play flag locally for immediate rendering. No network. Main thread.
      *
-     * <p>The flipped value is also the intent: {@link #toggleCommit()} reads it to
-     * decide whether to send play or pause.
+     * <p>The returned value carries the intent, but the caller must capture it and
+     * pass it to {@link #toggleCommit(boolean)} explicitly rather than relying on
+     * {@link #last}: a poll's queued {@link #refresh()} can land on the worker between
+     * this call and the commit and overwrite {@link #last} with the server's stale
+     * view, silently discarding the tap if the intent were re-read from the field.
      */
     public PlaybackState toggleOptimistic() {
         last = last.withPlaying(!last.playing);
         return last;
     }
 
-    /** Sends the command implied by the optimistic flip, then refetches. Blocking. */
-    public PlaybackState toggleCommit() {
-        Status result = last.playing ? client.play() : client.pause();
+    /**
+     * Sends the command the caller decided on, then refetches. Blocking.
+     *
+     * @param wantPlaying the intent captured from {@link #toggleOptimistic()}'s return
+     *     value at tap time, not re-read from {@link #last} — see that method's javadoc.
+     */
+    public PlaybackState toggleCommit(boolean wantPlaying) {
+        Status result = wantPlaying ? client.play() : client.pause();
         return settle(result);
     }
 
