@@ -19,6 +19,18 @@ public final class UrlHttpTransport implements HttpTransport {
     public HttpResponse execute(String method, String url, String bearer, String formBody)
             throws IOException {
         HttpsURLConnection connection = (HttpsURLConnection) new URL(url).openConnection();
+        // No unconditional connection.disconnect() in a finally here, deliberately:
+        // disconnect() tears down the pooled socket, forcing a fresh TLS 1.2
+        // handshake on the *next* poll — a real cost every 3 seconds on this
+        // OMAP4430. A fully drained response stream is what actually returns a
+        // connection to HttpsURLConnection's keep-alive pool, and readAll() below
+        // always fully drains and closes whichever stream (input or error) it is
+        // handed. `drained` tracks whether we got that far: on the normal path we
+        // leave the connection alone so it can be reused; if something throws before
+        // the stream is fully read, the connection is in an indeterminate state that
+        // must not be pooled, so the finally block below disconnects it explicitly.
+        // Do not change this back to an unconditional disconnect() in finally.
+        boolean drained = false;
         try {
             connection.setSSLSocketFactory(Tls.socketFactory());
             connection.setRequestMethod(method);
@@ -53,9 +65,13 @@ public final class UrlHttpTransport implements HttpTransport {
             InputStream stream = (code >= 400)
                     ? connection.getErrorStream()
                     : connection.getInputStream();
-            return new HttpResponse(code, readAll(stream));
+            HttpResponse response = new HttpResponse(code, readAll(stream));
+            drained = true;
+            return response;
         } finally {
-            connection.disconnect();
+            if (!drained) {
+                connection.disconnect();
+            }
         }
     }
 
