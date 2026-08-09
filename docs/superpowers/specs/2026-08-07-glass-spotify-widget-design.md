@@ -404,10 +404,17 @@ Toolchain notes, from the recorded gotchas and verified 2026-08-07:
   the launcher already relies on it in `gesture-core/build.gradle.kts`. The Android
   module uses `compileOptions { sourceCompatibility / targetCompatibility }` instead,
   because AGP emits `-source`/`-target` rather than `--release`. Follow that split.
-- JDK 21 javac is exactly the trigger for gotcha #5, where d8 8.2.2-dev NPEs on any
-  enum because javac records a nameless `MethodParameters` entry for implicit
-  enum-constructor params. **Avoid enums in shipped code**; use `static final int`
-  constants. This dodges the jar-stripping workaround entirely.
+- **Enums are fine in APK code.** Gotcha #5 (d8 NPE on JDK 21-compiled enums) applies
+  only to the *standalone* `d8` binary in build-tools 34.0.0, which is version
+  8.2.2-dev. AGP 8.7.0 bundles its own newer R8/d8 and handles enums correctly —
+  verified 2026-08-09 by finding `Gesture`, `GestureOrientation`, and `TouchPhase` all
+  dexed inside the shipped `glass-launcher-v0.2-2-debug.apk`.
+- The gotcha still binds **spike and probe code**, which is dexed with the standalone
+  `d8`. Reproduced 2026-08-09: `javac --release 8` then `d8` NPEs with
+  "Cannot invoke String.length() because <parameter1> is null". Counter-intuitively,
+  adding `-parameters` *fixes* it, because javac then emits real names instead of a
+  null one for the synthetic enum-constructor params. Either avoid enums in probes (as
+  `spike/TlsProbe.java` does) or pass `-parameters`.
 - Use the system Android SDK, as the launcher moved to in commit `3d01d3c`.
 - Device shell lacks `head`, `which`, `pidof`, `sed`. Pipe to the host instead
   (gotcha #8).
