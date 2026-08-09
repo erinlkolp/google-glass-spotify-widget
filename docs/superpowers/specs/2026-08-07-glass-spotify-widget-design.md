@@ -96,27 +96,30 @@ testing lives in a plain `java-library` that never sees an emulator.
 
 | Module | Type | Contains |
 |---|---|---|
-| `spotify-core` | `java-library` | `SpotifyClient`, `TokenStore`, `PlaybackState`, error mapping. Pure Java SE — `HttpsURLConnection` and `SSLContext` are both JDK classes. |
-| `app` | `com.android.application` | `ControllerActivity`, `NowPlayingView`, gesture translation, manifest, PEM resources |
+| `spotify-core` | `java-library` | `SpotifyClient`, `TokenStore`, `PlaybackState`, `Tls`, error mapping. Pure Java SE — `HttpsURLConnection` and `SSLContext` are both JDK classes. |
+| `app` | `com.android.application` | `ControllerActivity`, `NowPlayingView`, gesture translation, manifest |
 
 `spotify-core` takes `org.json` as `compileOnly` plus `testImplementation`. Android
 provides `org.json` at runtime, so nothing third-party is packaged into the APK while
-tests still get a real implementation. `TlsFactory` lives in `app` (it reads
-`res/raw`) and hands `spotify-core` an already-built `SSLSocketFactory`, so the core
-module stays Android-free.
+tests still get a real implementation.
+
+Because the stock trust store works (see TLS below), `spotify-core` needs nothing
+injected from `app` — the small `Tls` helper that pins enabled protocols to TLS 1.2 is
+plain `javax.net.ssl` and lives in the core module. The `app` module holds no network
+code at all.
 
 ```
 app ─────────────────────────────────────────┐
   ControllerActivity   UI, gestures, immersive mode
         │
-        ├── NowPlayingView      rendering only
-        └── TlsFactory          bundled trust anchors (conditional, see below)
+        └── NowPlayingView      rendering only
                                         │
 spotify-core ───────────────────────────┼─────┐
   PlayerController   orchestration, optimistic state, polling lifecycle
         │
         ├── SpotifyClient       the only class that touches the network
-        │        └── TokenStore     refresh-token persistence + rotation
+        │        ├── TokenStore     refresh-token persistence + rotation
+        │        └── Tls            SSLSocketFactory pinned to TLS 1.2
         └── PlaybackState       immutable snapshot
 ```
 
@@ -127,9 +130,9 @@ spotify-core ──────────────────────�
 | `ControllerActivity` | Owns the window, applies immersive flags, translates `MotionEvent` into intents, starts/stops polling with the resume lifecycle | `PlayerController`, `NowPlayingView` |
 | `NowPlayingView` | Draws title, artist, play state, and status messages. No logic. | `PlaybackState` |
 | `PlayerController` | Applies optimistic state, sequences command-then-refetch, owns the poll timer, maps errors to display strings | `SpotifyClient` |
-| `SpotifyClient` | Builds requests, parses JSON, handles 401-refresh-retry. Interface-backed so tests use a fake. | `TokenStore`, `TlsFactory` |
+| `SpotifyClient` | Builds requests, parses JSON, handles 401-refresh-retry. Interface-backed so tests use a fake. | `TokenStore`, `Tls` |
 | `TokenStore` | Reads and atomically writes the refresh token; supplies a valid access token | — |
-| `TlsFactory` | Supplies an `SSLSocketFactory` with bundled trust anchors | — |
+| `Tls` | Supplies an `SSLSocketFactory` restricted to TLS 1.2. Stock trust store. | — |
 | `PlaybackState` | Immutable value: title, artist, isPlaying, hasActiveDevice | — |
 
 `SpotifyClient` is the sole network boundary. Everything above it is testable on the
@@ -215,40 +218,61 @@ Therefore `TokenStore`:
 Access tokens live 3600s. On `401`, refresh once and retry the original request exactly
 once.
 
-## TLS
+## TLS — RESOLVED, measured on hardware 2026-08-09
 
-The highest-risk item in the project, and the reason for a spike before any other work.
+This was the project's top risk. **It is closed, and the answer is favourable.**
 
-This ROM's CA trust store dates from 2015. `api.spotify.com` and
-`accounts.spotify.com` may chain to roots it does not contain. TLS 1.2 itself is fine
-(enabled by default from API 20). Android's Network Security Config, the normal
-remedy, is **API 24+** and therefore unavailable.
+A dex probe was run on the real Glass via `app_process32` (the same technique used for
+the 2026-08-04 BLE measurement). Results:
 
-### Spike first
+```
+protocol = TLSv1.2
+cipher   = TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+provider = com.android.org.conscrypt.OpenSSLSocketFactoryImpl
 
-Before any UI, OAuth, or architecture work, run a ~40-line probe on the real device
-using the `app_process32` dex-probe technique already used to measure BLE capability on
-2026-08-04. It performs one real HTTPS GET against `api.spotify.com` and reports the
-outcome.
+chain    common.spotify.com  (expires 2027-02-20)
+      ←  DigiCert Global G2 TLS RSA SHA256 2020 CA1  (expires 2031-03-29)
+      ←  DigiCert Global Root G2
 
-- **Handshake succeeds** → `TlsFactory` is deleted from the design. Use plain
-  `HttpsURLConnection`. Do not build for the bad case before confirming it exists.
-- **Handshake fails** → bundle trust anchors: root CAs as PEM in `res/raw`, loaded at
-  runtime through `CertificateFactory` → `KeyStore` → `TrustManagerFactory` →
-  `SSLContext`. No BKS tooling, no third-party code.
+GET https://api.spotify.com/v1/me        → HTTP 401, well-formed JSON error body
+GET https://accounts.spotify.com/api/token → HTTP 405 (POST-only endpoint)
+```
 
-Belt-and-braces: explicitly `setEnabledProtocols` to TLS 1.2 on the socket even though
-it is the API 22 default.
+Both hosts complete the handshake against the **stock system trust store**, with no
+intervention. Spotify chains to **DigiCert Global Root G2**, issued 2013, which
+predates this ROM's 2015 store and is therefore already present. The 401 is the ideal
+outcome: TLS completed, the request reached Spotify, and only the token is missing.
 
-### Not negotiable
+### Consequences for the design
 
-No `ALLOW_ALL_HOSTNAME_VERIFIER`. No trust-everything `X509TrustManager`. Either would
-convert a handshake error into a silent MITM window on a connection carrying a token
-that controls the account.
+- **`TlsFactory` is removed from the design.** No PEM bundle in `res/raw`, no
+  `CertificateFactory` → `KeyStore` → `TrustManagerFactory` wiring, no `openssl
+  s_client` regeneration script, no CA-rotation maintenance.
+- Use plain `HttpsURLConnection` throughout.
+- `spotify-core` no longer needs an injected `SSLSocketFactory` from the `app` module,
+  which removes that seam entirely.
 
-If anchors are bundled, Spotify rotating CAs will break the app until the bundle is
-refreshed. Mitigations: ship an `openssl s_client` script to regenerate it, and keep
-the `Secure connection failed` message distinguishable so the cause is obvious.
+### One retained hardening measure
+
+The probe showed the client advertises `SSLv3, TLSv1, TLSv1.1, TLSv1.2` — a 2015
+default. Spotify's servers will not negotiate the weak ones, so real-world risk is low,
+but a ~15-line `SSLSocketFactory` wrapper calling `setEnabledProtocols` to TLS 1.2 only
+closes the question for a fraction of the code the trust-anchor work would have cost.
+Keep it.
+
+### Still not negotiable
+
+No `ALLOW_ALL_HOSTNAME_VERIFIER`. No trust-everything `X509TrustManager`. The
+connection carries a token that controls the account. Since the stock store works,
+there is now no scenario in which either would even be tempting.
+
+### Watch item
+
+The leaf expires 2027-02-20 and the intermediate 2031-03-29; DigiCert Global Root G2 is
+valid to 2038. If Spotify ever migrates to a root issued after 2015, the handshake will
+start failing and the bundled-anchor approach becomes necessary after all. The
+`Secure connection failed` error string is retained specifically so that day is
+diagnosable at a glance.
 
 ## UI
 
@@ -359,7 +383,7 @@ it.
 
 ### On-device sequence
 
-1. TLS spike.
+1. ~~TLS spike~~ — **done 2026-08-09, passed.** See the TLS section.
 2. Token bootstrap and first authenticated call.
 3. End-to-end against real playback on the phone.
 
@@ -420,3 +444,5 @@ None. Resolved during design:
 - Form factor: launcher card, not embedded panel.
 - Structure: single APK, launcher untouched.
 - Controls: transport and now-playing display only.
+- **TLS against the 2015 trust store: measured working 2026-08-09.** `TlsFactory` and
+  the bundled PEM anchors are out of scope.
