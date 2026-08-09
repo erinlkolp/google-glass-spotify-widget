@@ -25,10 +25,13 @@ SCOPES = "user-read-playback-state user-modify-playback-state"
 OUTPUT = "tools/refresh_token.txt"
 
 _received = {}
+_expected_state = None
 
 
 class CallbackHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        global _expected_state
+
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path != "/callback":
             self.send_response(404)
@@ -36,8 +39,20 @@ class CallbackHandler(http.server.BaseHTTPRequestHandler):
             return
 
         params = urllib.parse.parse_qs(parsed.query)
+        returned_state = params.get("state", [None])[0]
         _received["code"] = params.get("code", [None])[0]
         _received["error"] = params.get("error", [None])[0]
+
+        # Verify state parameter for CSRF protection
+        if returned_state != _expected_state:
+            _received["code"] = None
+            _received["state_mismatch"] = True
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            body = "<h1>Failed.</h1><p>State mismatch: CSRF check failed.</p>"
+            self.wfile.write(body.encode("utf-8"))
+            return
 
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -60,6 +75,8 @@ def make_verifier():
 
 
 def main():
+    global _expected_state
+
     if len(sys.argv) != 2:
         print(__doc__)
         return 1
@@ -67,6 +84,7 @@ def main():
 
     verifier, challenge = make_verifier()
     state = secrets.token_urlsafe(16)
+    _expected_state = state
 
     authorize_url = "https://accounts.spotify.com/authorize?" + urllib.parse.urlencode({
         "client_id": client_id,
@@ -86,6 +104,10 @@ def main():
     webbrowser.open(authorize_url)
     thread.join(timeout=300)
     server.server_close()
+
+    if _received.get("state_mismatch"):
+        print("State mismatch: CSRF check failed. Authorization aborted.")
+        return 1
 
     if not _received.get("code"):
         print("No authorization code received: %s" % _received.get("error"))
@@ -109,7 +131,8 @@ def main():
 
     refresh_token = token.get("refresh_token")
     if not refresh_token:
-        print("No refresh_token in response: %s" % token)
+        error_msg = token.get("error") or token.get("error_description") or "unknown error"
+        print("No refresh_token in response: %s" % error_msg)
         return 1
 
     with open(OUTPUT, "w", encoding="utf-8") as handle:
