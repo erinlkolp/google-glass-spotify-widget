@@ -107,13 +107,31 @@ public class ControllerActivity extends Activity {
      * that delete succeeding would risk re-importing the same bootstrap token on a
      * later launch, overwriting whatever {@link TokenStore} has since rotated to —
      * and because Spotify invalidates a refresh token once it has been exchanged,
-     * that is a silent, permanent lockout requiring a fresh laptop bootstrap.
+     * that would otherwise be a silent, permanent lockout requiring a fresh laptop
+     * bootstrap.
      *
      * <p>So idempotence is enforced independently of the delete: a SHA-256
      * fingerprint of the last-imported token is kept alongside the real token file.
      * A pushed file whose fingerprint matches the stored one has already been
      * consumed and is skipped, even if it could not be deleted. A genuinely new
      * pushed token has a different fingerprint and is imported as usual.
+     *
+     * <p><b>Write order matters and is deliberate: the fingerprint is written
+     * BEFORE the token, not after.</b> These are two separate, non-atomic file
+     * writes, so a crash or killed process between them is a real possibility, and
+     * the two orderings fail very differently. Fingerprint-then-token means the
+     * worst case is: fingerprint recorded, token write never happens or is
+     * torn — {@link TokenStore} then reads a missing/invalid token and reports
+     * {@code NEEDS_REAUTH}, which is visible and recoverable by re-running the
+     * laptop bootstrap. Token-then-fingerprint — the previous, incorrect order —
+     * means the worst case is: token imported and live, fingerprint never
+     * recorded — the next launch finds the (still-present, un-deletable) pushed
+     * file with no matching fingerprint and silently re-imports the
+     * already-exchanged bootstrap token over whatever has since rotated in,
+     * corrupting a working credential with no visible symptom. This method does
+     * <em>not</em> guarantee the fingerprint and token are ever consistent with
+     * each other; it only guarantees that when they are not, the failure is loud
+     * (re-auth prompt) rather than silent (lockout).
      */
     private void importBootstrapTokenIfPresent() {
         File pushed = new File(BOOTSTRAP_PATH);
@@ -122,6 +140,12 @@ public class ControllerActivity extends Activity {
         }
         try {
             byte[] contents = readFully(pushed);
+            if (contents.length == 0 || new String(contents, UTF8).trim().length() == 0) {
+                // A zero-byte or truncated adb push must never overwrite a working
+                // rotated refresh token. Bail out before writing anything at all.
+                Log.w(TAG, BOOTSTRAP_PATH + " is empty; leaving the stored token alone");
+                return;
+            }
             String fingerprint = sha256Hex(contents);
 
             File fingerprintFile = new File(getFilesDir(), BOOTSTRAP_FINGERPRINT_FILE);
@@ -130,8 +154,10 @@ public class ControllerActivity extends Activity {
                 Log.i(TAG, "bootstrap token already imported; skipping");
             } else {
                 File destination = new File(getFilesDir(), TOKEN_FILE);
-                writeAtomically(destination, contents);
+                // Fingerprint first: see the javadoc above for why this order is the
+                // one that fails safely.
                 writeAtomically(fingerprintFile, fingerprint.getBytes(UTF8));
+                writeAtomically(destination, contents);
                 Log.i(TAG, "imported bootstrap token (" + contents.length + " bytes)");
             }
 
