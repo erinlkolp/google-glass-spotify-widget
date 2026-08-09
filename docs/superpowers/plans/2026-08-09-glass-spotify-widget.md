@@ -1411,12 +1411,16 @@ public final class SpotifyClient {
             return PlaybackState.of(e.status);
         }
 
-        if (response.code == 204 || response.body.length() == 0) {
-            return PlaybackState.of(Status.NOTHING_PLAYING);
-        }
+        // Failure codes must be mapped BEFORE the empty-body check. A 429 arrives with
+        // an empty body, so checking emptiness first would report rate limiting as
+        // "Nothing playing". mapFailure returns null only for 2xx, so this ordering
+        // leaves every success path untouched.
         Status failure = mapFailure(response.code);
         if (failure != null) {
             return PlaybackState.of(failure);
+        }
+        if (response.code == 204 || response.body.length() == 0) {
+            return PlaybackState.of(Status.NOTHING_PLAYING);
         }
 
         try {
