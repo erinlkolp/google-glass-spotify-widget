@@ -63,6 +63,37 @@ public final class SpotifyClient {
         }
     }
 
+    /** Resumes playback on the active device. */
+    public Status play() {
+        return command("PUT", PLAYER + "/play");
+    }
+
+    /** Pauses playback on the active device. */
+    public Status pause() {
+        return command("PUT", PLAYER + "/pause");
+    }
+
+    /** Skips to the next track. */
+    public Status next() {
+        return command("POST", PLAYER + "/next");
+    }
+
+    /** Skips to the previous track. */
+    public Status previous() {
+        return command("POST", PLAYER + "/previous");
+    }
+
+    private Status command(String method, String url) {
+        HttpResponse response;
+        try {
+            response = send(method, url);
+        } catch (SpotifyException e) {
+            return e.status;
+        }
+        Status failure = mapFailure(response.code);
+        return failure == null ? Status.OK : failure;
+    }
+
     private static String firstArtist(JSONObject item) {
         JSONArray artists = item.optJSONArray("artists");
         if (artists == null || artists.length() == 0) {

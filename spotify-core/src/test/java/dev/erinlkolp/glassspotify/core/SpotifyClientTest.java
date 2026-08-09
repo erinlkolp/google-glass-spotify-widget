@@ -145,4 +145,79 @@ public class SpotifyClientTest {
 
         assertEquals(Status.UNKNOWN, client.currentState().status);
     }
+
+    @Test
+    public void playIssuesAPutToThePlayEndpoint() throws Exception {
+        http.enqueue(204, "");
+
+        assertEquals(Status.OK, client.play());
+        assertEquals("PUT", http.methods().get(1));
+        assertEquals("https://api.spotify.com/v1/me/player/play", http.urls().get(1));
+    }
+
+    @Test
+    public void pauseIssuesAPutToThePauseEndpoint() throws Exception {
+        http.enqueue(204, "");
+
+        assertEquals(Status.OK, client.pause());
+        assertEquals("PUT", http.methods().get(1));
+        assertEquals("https://api.spotify.com/v1/me/player/pause", http.urls().get(1));
+    }
+
+    @Test
+    public void nextIssuesAPostToTheNextEndpoint() throws Exception {
+        http.enqueue(204, "");
+
+        assertEquals(Status.OK, client.next());
+        assertEquals("POST", http.methods().get(1));
+        assertEquals("https://api.spotify.com/v1/me/player/next", http.urls().get(1));
+    }
+
+    @Test
+    public void previousIssuesAPostToThePreviousEndpoint() throws Exception {
+        http.enqueue(204, "");
+
+        assertEquals(Status.OK, client.previous());
+        assertEquals("POST", http.methods().get(1));
+        assertEquals("https://api.spotify.com/v1/me/player/previous", http.urls().get(1));
+    }
+
+    @Test
+    public void a404OnACommandMeansNoActiveDevice() throws Exception {
+        http.enqueue(404, "{\"error\":{\"reason\":\"NO_ACTIVE_DEVICE\"}}");
+
+        assertEquals(Status.NO_DEVICE, client.next());
+    }
+
+    @Test
+    public void a403OnACommandMeansNotPermitted() throws Exception {
+        // What a Free-tier account receives for every control endpoint.
+        http.enqueue(403, "{\"error\":{\"status\":403}}");
+
+        assertEquals(Status.NOT_PERMITTED, client.play());
+    }
+
+    @Test
+    public void a401OnACommandRefreshesTheTokenAndRetriesExactlyOnce() throws Exception {
+        http.enqueue(401, "{\"error\":{\"status\":401}}");
+        http.enqueue(200, "{\"access_token\":\"AT2\",\"expires_in\":3600}");
+        http.enqueue(204, "");
+
+        assertEquals(Status.OK, client.pause());
+
+        // token refresh, failed PUT, second token refresh, retried PUT
+        assertEquals(4, http.urls().size());
+        assertEquals("AT1", http.bearers().get(1));
+        assertEquals("AT2", http.bearers().get(3));
+    }
+
+    @Test
+    public void aSecondConsecutive401IsNotRetriedAgain() throws Exception {
+        http.enqueue(401, "");
+        http.enqueue(200, "{\"access_token\":\"AT2\",\"expires_in\":3600}");
+        http.enqueue(401, "");
+
+        assertEquals(Status.NEEDS_REAUTH, client.pause());
+        assertEquals(4, http.urls().size());
+    }
 }
