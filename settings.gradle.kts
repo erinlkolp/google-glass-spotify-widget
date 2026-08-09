@@ -15,8 +15,7 @@ dependencyResolutionManagement {
 rootProject.name = "glass-spotify-widget"
 
 include(":spotify-core")
-// The app module does not exist until Task 9. Re-enabled there.
-// include(":app")
+include(":app")
 
 // gesture-core is the single source of truth for the touchpad anisotropy maths and
 // the empirically-tuned gesture thresholds. It lives in the Gesture Launcher repo and
