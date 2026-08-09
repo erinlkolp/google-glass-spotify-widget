@@ -2485,6 +2485,30 @@ git commit -m "feat(app): NowPlayingView rendering white on black"
 
 **Replace `CLIENT_ID` with the real Client ID from Task 8 before building.**
 
+> **Two defects in the reference code below were found in review and fixed during
+> implementation. The committed source is authoritative; this listing is not.**
+>
+> 1. **`importBootstrapTokenIfPresent` was not idempotent, and could cause a permanent
+>    Spotify lockout.** It re-imported on every launch for as long as the pushed file
+>    existed, and its javadoc wrongly claimed `pushed.delete()` prevented that.
+>    `/data/local/tmp` carries the sticky bit, so the app's uid cannot reliably delete a
+>    shell-pushed file — an avc denial for exactly this was observed on the device. Once
+>    the delete fails, the next launch overwrites whatever `TokenStore` has rotated to,
+>    and Spotify has already invalidated that original token. Fixed by fingerprinting the
+>    pushed file's contents (SHA-256) into a `bootstrap_fingerprint` marker in
+>    `getFilesDir()`, written with the same write-temp-then-rename discipline as
+>    `TokenStore`, and skipping the import when the fingerprint matches. A genuinely new
+>    pushed token still imports; an undeletable leftover never overwrites.
+> 2. **`publish()` could render into a torn-down Activity.** `shutdownNow()` only
+>    interrupts, and `HttpsURLConnection` blocking I/O ignores interruption, so a command
+>    in flight when the user exits could call `view.render()` up to ~20s later. Fixed by
+>    checking `isFinishing() || isDestroyed()` inside the posted Runnable, on the main
+>    thread.
+>
+> The corrected code is deliberately not re-transcribed here — see
+> `app/src/main/java/dev/erinlkolp/glassspotify/ControllerActivity.java`. Re-transcribing
+> ~80 lines into a document that no longer drives implementation would only invite drift.
+
 - [ ] **Step 1: Write `MotionEventAdapter.java`**
 
 Same shape as the launcher's, retargeted to this package. `gesture-core` deliberately

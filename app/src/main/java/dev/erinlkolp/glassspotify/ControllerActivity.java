@@ -46,7 +46,7 @@ public class ControllerActivity extends Activity {
     private static final Charset UTF8 = Charset.forName("UTF-8");
 
     /** From the Spotify developer dashboard. PKCE uses no client secret. */
-    private static final String CLIENT_ID = "REPLACE_WITH_YOUR_CLIENT_ID";
+    private static final String CLIENT_ID = "26b546a81db94a12a0a7621d37724b93";
 
     /** Where bootstrap_token.py's output is pushed before first run. */
     private static final String BOOTSTRAP_PATH = "/data/local/tmp/spotify_bootstrap_token";
