@@ -6,3 +6,4 @@ build/
 tools/refresh_token.txt
 __pycache__/
 data/
+.claude/settings.local.json
