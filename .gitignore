@@ -5,3 +5,4 @@ build/
 .superpowers/
 tools/refresh_token.txt
 __pycache__/
+data/
