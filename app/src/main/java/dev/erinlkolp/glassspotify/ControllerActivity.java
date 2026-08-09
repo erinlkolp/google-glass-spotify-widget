@@ -26,6 +26,9 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.charset.Charset;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -40,6 +43,7 @@ import java.util.concurrent.Executors;
 public class ControllerActivity extends Activity {
 
     private static final String TAG = "GlassSpotify";
+    private static final Charset UTF8 = Charset.forName("UTF-8");
 
     /** From the Spotify developer dashboard. PKCE uses no client secret. */
     private static final String CLIENT_ID = "REPLACE_WITH_YOUR_CLIENT_ID";
@@ -47,6 +51,8 @@ public class ControllerActivity extends Activity {
     /** Where bootstrap_token.py's output is pushed before first run. */
     private static final String BOOTSTRAP_PATH = "/data/local/tmp/spotify_bootstrap_token";
     private static final String TOKEN_FILE = "refresh_token";
+    /** Fingerprint of the last bootstrap token actually imported; guards re-import. */
+    private static final String BOOTSTRAP_FINGERPRINT_FILE = "bootstrap_fingerprint";
 
     private static final long POLL_INTERVAL_MS = 3000L;
     /** Long enough for Spotify Connect to reach the phone and settle. */
@@ -90,11 +96,24 @@ public class ControllerActivity extends Activity {
     }
 
     /**
-     * Moves a pushed bootstrap token into private storage, once.
+     * Moves a pushed bootstrap token into private storage, but only once per distinct
+     * token value — the delete below is best-effort, not the mechanism that
+     * guarantees that.
      *
      * <p>Avoids chown gymnastics: adb pushes to /data/local/tmp, and the app adopts it
-     * on first launch. The pushed copy is deleted so a stale token cannot later
-     * overwrite a rotated one.
+     * on first launch. Deleting the pushed copy is attempted so a stale file does not
+     * linger, but /data/local/tmp conventionally has the sticky bit set, so this
+     * app's uid may not be able to remove a file the shell uid pushed. Relying on
+     * that delete succeeding would risk re-importing the same bootstrap token on a
+     * later launch, overwriting whatever {@link TokenStore} has since rotated to —
+     * and because Spotify invalidates a refresh token once it has been exchanged,
+     * that is a silent, permanent lockout requiring a fresh laptop bootstrap.
+     *
+     * <p>So idempotence is enforced independently of the delete: a SHA-256
+     * fingerprint of the last-imported token is kept alongside the real token file.
+     * A pushed file whose fingerprint matches the stored one has already been
+     * consumed and is skipped, even if it could not be deleted. A genuinely new
+     * pushed token has a different fingerprint and is imported as usual.
      */
     private void importBootstrapTokenIfPresent() {
         File pushed = new File(BOOTSTRAP_PATH);
@@ -102,35 +121,88 @@ public class ControllerActivity extends Activity {
             return;
         }
         try {
-            // Not java.nio.file.Files — that is API 26+ and this device is API 22.
-            ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-            InputStream in = new FileInputStream(pushed);
-            try {
-                byte[] chunk = new byte[1024];
-                int read;
-                while ((read = in.read(chunk)) != -1) {
-                    buffer.write(chunk, 0, read);
-                }
-            } finally {
-                in.close();
-            }
-            byte[] contents = buffer.toByteArray();
+            byte[] contents = readFully(pushed);
+            String fingerprint = sha256Hex(contents);
 
-            File destination = new File(getFilesDir(), TOKEN_FILE);
-            OutputStream out = new FileOutputStream(destination);
-            try {
-                out.write(contents);
-                out.flush();
-            } finally {
-                out.close();
+            File fingerprintFile = new File(getFilesDir(), BOOTSTRAP_FINGERPRINT_FILE);
+            String storedFingerprint = readFileIfPresent(fingerprintFile);
+            if (fingerprint.equals(storedFingerprint)) {
+                Log.i(TAG, "bootstrap token already imported; skipping");
+            } else {
+                File destination = new File(getFilesDir(), TOKEN_FILE);
+                writeAtomically(destination, contents);
+                writeAtomically(fingerprintFile, fingerprint.getBytes(UTF8));
+                Log.i(TAG, "imported bootstrap token (" + contents.length + " bytes)");
             }
-            Log.i(TAG, "imported bootstrap token (" + contents.length + " bytes)");
+
             if (!pushed.delete()) {
                 Log.w(TAG, "could not delete " + BOOTSTRAP_PATH + "; delete it by hand");
             }
         } catch (IOException e) {
             Log.e(TAG, "bootstrap token import failed", e);
+        } catch (NoSuchAlgorithmException e) {
+            Log.e(TAG, "bootstrap token import failed", e);
         }
+    }
+
+    /**
+     * Reads a whole file without {@code java.nio.file} — that is API 26+ and would
+     * throw {@code NoClassDefFoundError} on this API 22 device despite compiling
+     * cleanly here.
+     */
+    private static byte[] readFully(File file) throws IOException {
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        InputStream in = new FileInputStream(file);
+        try {
+            byte[] chunk = new byte[1024];
+            int read;
+            while ((read = in.read(chunk)) != -1) {
+                buffer.write(chunk, 0, read);
+            }
+        } finally {
+            in.close();
+        }
+        return buffer.toByteArray();
+    }
+
+    /** @return the file's contents as UTF-8, or null if it does not exist. */
+    private static String readFileIfPresent(File file) throws IOException {
+        if (!file.isFile()) {
+            return null;
+        }
+        return new String(readFully(file), UTF8);
+    }
+
+    /**
+     * Writes to a sibling temp file, then renames — the same discipline
+     * {@link TokenStore} uses, so a half-written marker can never be read as valid.
+     */
+    private static void writeAtomically(File destination, byte[] contents) throws IOException {
+        File temp = new File(destination.getParentFile(), destination.getName() + ".tmp");
+        OutputStream out = new FileOutputStream(temp);
+        try {
+            out.write(contents);
+            out.flush();
+        } finally {
+            out.close();
+        }
+        if (!temp.renameTo(destination)) {
+            temp.delete();
+            throw new IOException("rename failed: " + temp + " -> " + destination);
+        }
+    }
+
+    private static String sha256Hex(byte[] data) throws NoSuchAlgorithmException {
+        byte[] hash = MessageDigest.getInstance("SHA-256").digest(data);
+        StringBuilder hex = new StringBuilder(hash.length * 2);
+        for (int i = 0; i < hash.length; i++) {
+            String part = Integer.toHexString(0xff & hash[i]);
+            if (part.length() == 1) {
+                hex.append('0');
+            }
+            hex.append(part);
+        }
+        return hex.toString();
     }
 
     @Override
@@ -255,10 +327,24 @@ public class ControllerActivity extends Activity {
         });
     }
 
+    /**
+     * Posts a render to the main thread, unless the Activity is on its way out.
+     *
+     * <p>{@code worker.shutdownNow()} in {@link #onDestroy()} only interrupts a
+     * running task; it cannot unblock {@link UrlHttpTransport}'s blocking
+     * {@code HttpsURLConnection} I/O (up to 10s connect + 10s read), so a command
+     * already in flight when the user exits can still be running when this posts.
+     * Checking {@code isFinishing()}/{@code isDestroyed()} here — on the main thread,
+     * right before touching the view — stops that stale result from rendering into
+     * (and thereby keeping alive) a detached view.
+     */
     private void publish(final PlaybackState state) {
         main.post(new Runnable() {
             @Override
             public void run() {
+                if (isFinishing() || isDestroyed()) {
+                    return;
+                }
                 view.render(state);
             }
         });
